@@ -1,0 +1,44 @@
+seed: 42
+
+paths:
+  processed_dir: data/processed
+  embeddings_dir: data/embeddings
+  results_dir: data/results
+  plots_dir: data/plots
+
+dataset:
+  name: ag_news
+  split: train
+  subset_size: 10000
+  text_column: text
+  label_column: label
+  processed_file: ag_news_train.parquet
+
+embedding:
+  model: sentence-transformers/all-MiniLM-L6-v2
+  batch_size: 128
+  normalize: true
+  device: cpu
+  embeddings_file: ag_news_all_minilm_l6_v2.npy
+
+search:
+  k: 10
+  backend: numpy
+
+benchmark:
+  warmup_runs: 5
+  measured_runs: 50
+  dataset_sizes:
+    - 10000
+    - 50000
+    - 100000
+  batch_sizes:
+    - 1
+    - 8
+    - 32
+    - 128
+  results_file: search_benchmark_results.csv
+
+backends:
+  - numpy
+  - faiss_cpu

@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+pytest-cache-files-*/
+.mypy_cache/
+.ruff_cache/
+data/raw/*
+data/processed/*
+data/embeddings/*
+data/results/*
+data/plots/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/embeddings/.gitkeep
+!data/results/.gitkeep
+!data/plots/.gitkeep
