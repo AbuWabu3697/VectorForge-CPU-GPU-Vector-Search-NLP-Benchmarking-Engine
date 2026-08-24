@@ -87,7 +87,7 @@ src/ocr/evaluation/     greedy decoding, CER, WER, evaluation
 src/ocr/benchmarks/     experiment matrix and resilient benchmark runner
 src/visualization/      matplotlib plots from result files
 src/cli/                command-line entry points
-notebooks/              Kaggle/Colab/local GPU experiment driver
+notebooks/              Google Colab GPU experiment driver
 tests/                  fast synthetic unit tests
 scripts/                convenience shell scripts
 results/ocr/            ignored OCR CSVs, checkpoints, metadata, and plots
@@ -311,14 +311,16 @@ Plots are derived from `results/ocr/benchmark_results.csv`: CPU/GPU throughput, 
 
 ### Cloud NVIDIA GPU Notebook
 
-Open [notebooks/vectorforge_ocr_gpu_benchmark.ipynb](notebooks/vectorforge_ocr_gpu_benchmark.ipynb) in Kaggle, Google Colab, or local Jupyter. On Kaggle choose **Notebook Settings → Accelerator → GPU**; on Colab choose **Runtime → Change runtime type → GPU**. The notebook:
+Open [notebooks/VectorForge.ipynb](notebooks/VectorForge.ipynb) in Google Colab. Choose **Runtime > Change runtime type > Hardware accelerator > T4 GPU** before running the cells. The notebook:
 
 1. inspects PyTorch/CUDA and optionally `nvidia-smi`;
-2. preserves the provider's existing CUDA-enabled PyTorch installation;
-3. generates and visualizes data;
-4. runs tiny CPU/GPU smoke tests before full experiments;
-5. drives the shared benchmark runner rather than duplicating training code;
-6. evaluates predictions and exports CSVs, checkpoints, metadata, and plots as a zip.
+2. clones the GitHub repository into `/content`;
+3. installs project dependencies without replacing Colab's CUDA-enabled PyTorch build;
+4. runs the full pytest suite, including the CUDA-specific OCR test;
+5. generates the synthetic OCR dataset;
+6. trains the CRNN + CTC OCR model on CUDA;
+7. runs the baseline CPU/GPU benchmark;
+8. previews CSV results, renders plots, and exports artifacts as a zip.
 
 Hosted GPUs vary, so every result records the hardware actually assigned. Perfect numerical reproducibility between CPU, CUDA, FP32, FP16, and BF16 is not guaranteed even with fixed Python, NumPy, PyTorch, and CUDA seeds.
 
