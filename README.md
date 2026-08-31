@@ -4,7 +4,7 @@ VectorForge is a hardware-aware AI benchmarking project investigating how CPU an
 
 - **Part 1 — Vector search:** real text, Sentence Transformer embeddings, exact NumPy search, and exact FAISS CPU search.
 - **Part 2 — OCR training:** a transparent character-level CRNN + CTC workload for CPU/CUDA, batch-size, precision, image-resolution, memory, speed, and recognition-quality experiments.
-- **Part 3 — GPU profiling:** planned NVIDIA Nsight Systems/Compute and CUDA-level bottleneck analysis.
+- **Part 3 — GPU systems:** correct CUDA timing, phase attribution, PyTorch/Nsight workflows, transfer and memory analysis, and an educational native CUDA exact-search kernel.
 
 ## Why This Project
 
@@ -85,12 +85,14 @@ src/ocr/models/         CRNN and model factory
 src/ocr/training/       CTC, training, precision, devices, checkpoints
 src/ocr/evaluation/     greedy decoding, CER, WER, evaluation
 src/ocr/benchmarks/     experiment matrix and resilient benchmark runner
+src/profiling/          timers, metadata, NVTX, traces, workload profilers, CUDA, analysis
 src/visualization/      matplotlib plots from result files
 src/cli/                command-line entry points
 notebooks/              Google Colab GPU experiment driver
 tests/                  fast synthetic unit tests
 scripts/                convenience shell scripts
 results/ocr/            ignored OCR CSVs, checkpoints, metadata, and plots
+results/profiling/      ignored traces/reports/summaries/plots with tracked directories
 ```
 
 ## Setup
@@ -192,7 +194,7 @@ build_time_ms, mean_latency_ms, median_latency_ms, p95_latency_ms,
 p99_latency_ms, queries_per_second, timestamp
 ```
 
-Future GPU-specific fields such as `device`, `gpu_name`, `gpu_memory_mb`, `gpu_utilization`, and `precision` are already part of the schema.
+GPU-specific fields such as `device`, `gpu_name`, `gpu_memory_mb`, `gpu_utilization`, and `precision` are part of the schema; unavailable measurements remain null.
 
 ## Plot Results
 
@@ -213,15 +215,14 @@ Plots are generated from the benchmark results file, not hardcoded values:
 
 NumPy and FAISS CPU should return effectively identical nearest neighbors for exact search. The validation helper in `src/search/utils.py` compares top-k agreement.
 
-## Planned GPU Work
+## GPU Search Backends
 
-The next search backends belong in `src/search/` and should implement the same `SearchBackend` interface:
+GPU backends implement the same `SearchBackend` interface:
 
-- `FaissGpuSearch`: use FAISS GPU resources and `IndexFlatIP` on CUDA.
-- `CudaBruteForceSearch`: custom CUDA extension for brute-force dot products, useful for learning blocks, grids, memory coalescing, shared memory, transfers, and launch overhead.
-- `CuVSSearch`: use NVIDIA cuVS for GPU vector search and later approximate nearest-neighbor experiments.
+- `FaissGpuSearch`: exact `IndexFlatIP` on CUDA. Document vectors are transferred once during `build()` and remain resident.
+- `CudaBruteForceSearch`: native CUDA scoring kernels compiled lazily through PyTorch, with separate H2D, scoring, CUDA top-k, and D2H timing.
 
-The benchmark runner, result schema, dataset loader, embeddings, and plots do not need to change for those additions.
+The CPU backends and existing CLI remain unchanged. A CUDA-enabled FAISS build is optional; `faiss-cpu` does not silently masquerade as GPU support.
 
 ## Part 2 — Character-Level OCR Training
 
@@ -299,7 +300,7 @@ Baseline CPU and CUDA runs hold the dataset, architecture, seed, optimizer, lear
 
 Training timing is end-to-end per epoch: DataLoader work, CPU-to-device movement, forward pass, CTC loss, backward pass, and optimizer step. CUDA is synchronized immediately before and after each timed interval because CUDA launches asynchronously. GPU warmup happens before a freshly seeded measured model is created, avoiding one-time initialization in steady-state throughput without changing its starting weights. `peak_vram_mb` means PyTorch peak **allocated** memory, converted to MiB.
 
-Results include actual GPU name, CUDA/PyTorch versions, configuration, epoch/total time, samples/second, peak VRAM, loss, CER, WER, and exact match. Checkpoints contain model state, optimizer state, epoch, config, and vocabulary. Data loaded from pinned host memory may use non-blocking transfers so future Part 3 profiling can separate input-pipeline and transfer bottlenecks.
+Results include actual GPU name, CUDA/PyTorch versions, configuration, epoch/total time, samples/second, peak VRAM, loss, CER, WER, and exact match. Checkpoints contain model state, optimizer state, epoch, config, and vocabulary. Data loaded from pinned host memory may use non-blocking transfers. Optional Part 3 instrumentation separates DataLoader wait, H2D, forward, CTC loss, backward, optimizer, and validation phases.
 
 ### Plot Saved Results
 
@@ -338,14 +339,101 @@ Part 2 is designed to test:
 8. Which workloads underutilize the GPU?
 9. Which experiment configurations benefit most from GPU parallelism?
 
-## Planned Part 3
+## Part 3 — Why the hardware behaved differently
 
-Profiling will wrap workloads instead of living inside backend/model logic. The OCR loop deliberately leaves data loading, host-to-device transfer, forward pass, loss, backward pass, and optimizer step as visible phases for future NVTX ranges. Planned tools include:
+Part 1 asks **what is faster?** Part 2 asks **how does ML training respond to GPU acceleration?** Part 3 collects the evidence needed to ask **why did the hardware behave that way?**
 
-- NVIDIA Nsight Systems
-- NVIDIA Nsight Compute
-- PyTorch Profiler
-- CPU profilers
+```text
+                     VECTORFORGE
+
+                  Benchmark workloads
+
+         +---------------------------+
+         |                           |
+         v                           v
+   Vector Search                 OCR Training
+ CPU / FAISS CPU              CPU / PyTorch
+ GPU / FAISS GPU              GPU / CUDA
+         |                           |
+         +-------------+-------------+
+                       v
+                  PROFILING
+                       |
+         +-------------+-------------+
+         v             v             v
+ PyTorch Profiler  Nsight Systems  Nsight Compute
+         |             |             |
+         +-------------+-------------+
+                       v
+                  Bottlenecks
+                       v
+                Explain Results
+```
+
+The reusable layer under `src/profiling/` provides:
+
+- synchronized end-to-end wall timing and CUDA Event device-stream timing;
+- actual GPU name/count, compute capability, CUDA/PyTorch versions, and VRAM;
+- optional high-level NVTX ranges for readable Nsight timelines;
+- scheduled PyTorch Profiler traces and expensive-operator summaries;
+- OCR phase statistics and search transfer/kernel/top-k breakdowns;
+- allocated/reserved/peak CUDA memory snapshots and optional coarse `nvidia-smi` samples;
+- nullable result fields, real-result plots, Chrome trace parsing, and cautious bottleneck observations;
+- native CUDA `naive` and cooperative `block_reduce` inner-product kernels; and
+- preflighted Nsight Systems/Compute wrappers that fail clearly when a tool is absent.
+
+Normal execution does not require profiling, Nsight, CUDA, or `nvcc`. CUDA/compiler tests skip automatically. Profiling defaults are separate in [config/profiling.yaml](config/profiling.yaml).
+
+### Correct timing and phase attribution
+
+CUDA work is asynchronous. The normal search benchmark now asks every backend to synchronize immediately before and after each wall interval. The OCR epoch benchmark already used this correct end-to-end pattern. Part 3 additionally supports CUDA Events for isolated operations.
+
+```text
+end-to-end wall latency = host work + work/transfers inside the boundary + device completion
+CUDA Event time         = elapsed work on the measured CUDA stream
+```
+
+OCR profiling measures DataLoader wait, H2D, forward, CTC loss, backward, and optimizer time. The phase timer synchronizes boundaries, so its percentages are useful attribution but do not prove overlap. Use the exported PyTorch/Nsight timeline for CPU/GPU overlap and idle-gap claims.
+
+```bash
+python -m src.ocr.training.trainer --device cuda --precision fp16 \
+  --profiling-config config/profiling.yaml
+python -m src.cli.profile_search --backend faiss_gpu
+```
+
+### CUDA learning experiment
+
+FAISS GPU already uses CUDA internally, and PyTorch GPU training invokes CUDA-backed cuDNN/cuBLAS and framework kernels. The custom kernel exists to expose the lower level directly—not because custom code is automatically superior.
+
+A CUDA **kernel** runs across GPU threads. Threads form blocks; blocks form a grid; hardware executes threads in warps. Registers are fast per-thread storage, shared memory is fast block-local storage, and global memory is the larger high-latency device memory. Coalescing nearby thread accesses reduces memory transactions. Occupancy describes how well execution resources can be populated with active warps, though it is not a performance score by itself. Divergent warp paths, poor memory layout, small grids, transfers, and fixed kernel-launch overhead can all matter.
+
+The first kernel assigns one thread to a complete dot product. The second assigns a block to a dot product, uses adjacent dimension reads and registers, then reduces through shared memory. Every version is checked against NumPy exact search; neither is labeled an optimization until actual results demonstrate an improvement.
+
+```bash
+bash scripts/profile_cuda_search.sh --dataset-size 10000 --batch-size 32
+bash scripts/profile_cuda_search.sh --ncu --dataset-size 10000 --batch-size 32
+```
+
+### Nsight and cloud workflow
+
+[docs/profiling.md](docs/profiling.md) documents representative small/large batches, FP32/FP16 runs, timing semantics, memory labels, Nsight inspection, and interpretation boundaries. `scripts/profile_search.sh --nsys` and `scripts/profile_ocr.sh --nsys` create Nsight Systems reports where `nsys` is installed. `scripts/profile_cuda_search.sh --ncu` filters Nsight Compute collection to the educational kernels. The wrappers never create pretend output when a CLI is unavailable.
+
+[![Open Part 3 in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/AbuWabu3697/VectorForge-CPU-GPU-Vector-Search-NLP-Benchmarking-Engine/blob/main/notebooks/vectorforge_gpu_profiling.ipynb)
+
+[notebooks/vectorforge_gpu_profiling.ipynb](notebooks/vectorforge_gpu_profiling.ipynb) is the Colab-first Part 3 driver. Push the latest repository changes to GitHub, open the badge, choose **Runtime > Change runtime type > T4 GPU**, and run all cells. The notebook:
+
+1. refuses to continue without an assigned NVIDIA GPU and `nvcc`;
+2. clones the exact GitHub repository and records its commit;
+3. preserves Colab's CUDA-enabled PyTorch while installing the remaining dependencies;
+4. requires all 29 CPU/CUDA tests to pass with zero skips;
+5. records the assigned GPU and correct wall/Event timing;
+6. profiles representative OCR FP32/FP16 and batch-size cases;
+7. validates and benchmarks both custom CUDA search kernels; and
+8. downloads summaries, PyTorch traces, and plots as a zip archive.
+
+Colab may omit full Nsight tools. When that happens, the notebook records their absence and retains PyTorch Profiler traces and CUDA Event measurements; it never fabricates Nsight output.
+
+Compute-bound means arithmetic throughput is the main limiting resource; memory-bound means data movement is. Vector search often reads a large matrix, while OCR has convolution and matrix operations, but VectorForge does not classify either from intuition. The analysis helper requires comparable collected DRAM and SM throughput evidence, and Tensor Core use is reported only when a trace/kernel metric demonstrates it.
 
 ## Tests
 

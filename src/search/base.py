@@ -15,7 +15,7 @@ class SearchResponse:
 
 
 class SearchBackend(ABC):
-    """Common interface for CPU and future GPU vector-search backends."""
+    """Common interface for CPU and GPU vector-search backends."""
 
     @abstractmethod
     def build(self, vectors: np.ndarray) -> None:
@@ -29,3 +29,19 @@ class SearchBackend(ABC):
     @abstractmethod
     def name(self) -> str:
         """Stable backend name used in results."""
+
+    @property
+    def device_type(self) -> str:
+        return "cpu"
+
+    @property
+    def index_residency(self) -> str:
+        return "host"
+
+    def synchronize(self) -> None:
+        """Wait for backend work; CPU implementations are synchronous."""
+        return None
+
+    def configure_profiling(self, *, nvtx_enabled: bool = False) -> None:
+        """Enable optional annotations without changing the search API."""
+        return None

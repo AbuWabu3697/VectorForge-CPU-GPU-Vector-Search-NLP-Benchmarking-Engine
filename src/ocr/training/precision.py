@@ -5,6 +5,8 @@ from contextlib import AbstractContextManager
 
 import torch
 
+from src.profiling.common.device_info import collect_device_info
+
 
 SUPPORTED_PRECISIONS = {"fp32", "fp16", "bf16"}
 
@@ -48,17 +50,12 @@ def create_grad_scaler(device: torch.device, precision: str):
 
 
 def hardware_metadata(device: torch.device) -> dict[str, object]:
-    metadata: dict[str, object] = {
-        "torch_version": torch.__version__,
+    details = collect_device_info(device)
+    return {
+        **details,
         "cuda_available": torch.cuda.is_available(),
-        "cuda_version": torch.version.cuda,
         "device": device.type,
-        "device_name": "CPU",
-        "gpu_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
     }
-    if device.type == "cuda":
-        metadata["device_name"] = torch.cuda.get_device_name(device)
-    return metadata
 
 
 def synchronize(device: torch.device) -> None:

@@ -42,3 +42,4 @@ benchmark:
 backends:
   - numpy
   - faiss_cpu
+  # Add faiss_gpu on a machine with a CUDA-enabled FAISS build.

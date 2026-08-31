@@ -4,7 +4,7 @@ import argparse
 import json
 import random
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -32,6 +32,11 @@ from src.ocr.training.precision import (
     synchronize,
     validate_precision,
 )
+from src.profiling.config import ProfilingConfig, load_profiling_config
+from src.profiling.common.memory import cuda_memory_snapshot
+from src.profiling.ocr.training_profiler import OCRTrainingProfiler
+from src.profiling.persistence import write_profile_json
+from src.profiling.schema import ProfilingResult
 
 
 @dataclass
@@ -65,6 +70,9 @@ class TrainingRunResult:
     exact_match_accuracy: float
     status: str
     seed: int
+    phase_times_ms: dict[str, float] = field(default_factory=dict)
+    phase_fractions: dict[str, float] = field(default_factory=dict)
+    profiling_summary_file: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -154,26 +162,55 @@ def _train_epoch(
     autocast,
     device: torch.device,
     non_blocking: bool,
+    profiler: OCRTrainingProfiler | None = None,
 ) -> tuple[float, float]:
     model.train()
     loss_total = 0.0
     sample_total = 0
     synchronize(device)
     start = time.perf_counter()
-    for batch in loader:
-        # These explicit phases are natural future NVTX/Nsight profiling boundaries.
-        images = batch["images"].to(device, non_blocking=non_blocking)
-        targets = batch["targets"].to(device, non_blocking=non_blocking)
+    iterator = iter(loader)
+    while True:
+        try:
+            if profiler is None:
+                batch = next(iterator)
+            else:
+                with profiler.phase("data_loading"):
+                    batch = next(iterator)
+        except StopIteration:
+            break
+        if profiler is None:
+            images = batch["images"].to(device, non_blocking=non_blocking)
+            targets = batch["targets"].to(device, non_blocking=non_blocking)
+        else:
+            with profiler.phase("h2d_transfer"):
+                images = batch["images"].to(device, non_blocking=non_blocking)
+                targets = batch["targets"].to(device, non_blocking=non_blocking)
         optimizer.zero_grad(set_to_none=True)
-        with autocast():
-            logits = model(images)
-            loss = criterion(logits, targets, batch["target_lengths"])
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        if profiler is None:
+            with autocast():
+                logits = model(images)
+                loss = criterion(logits, targets, batch["target_lengths"])
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            with profiler.phase("forward"):
+                with autocast():
+                    logits = model(images)
+            with profiler.phase("ctc_loss"):
+                with autocast():
+                    loss = criterion(logits, targets, batch["target_lengths"])
+            with profiler.phase("backward"):
+                scaler.scale(loss).backward()
+            with profiler.phase("optimizer"):
+                scaler.step(optimizer)
+                scaler.update()
         batch_size = int(images.shape[0])
         loss_total += float(loss.item()) * batch_size
         sample_total += batch_size
+        if profiler is not None:
+            profiler.step()
     synchronize(device)
     elapsed = time.perf_counter() - start
     return loss_total / max(sample_total, 1), elapsed
@@ -185,6 +222,7 @@ def train_from_config(
     experiment_id: str | None = None,
     save_artifacts: bool = True,
     warmup_batches: int | None = None,
+    profiling_config: ProfilingConfig | dict[str, Any] | None = None,
 ) -> tuple[TrainingRunResult, list[dict[str, object]], nn.Module]:
     seed = int(config.get("seed", 42))
     seed_everything(seed)
@@ -242,38 +280,104 @@ def train_from_config(
     latest_metrics: dict[str, object] = {}
     run_id = experiment_id or datetime.now(timezone.utc).strftime("ocr-%Y%m%dT%H%M%S%fZ")
     results_dir = Path(paths.get("results_dir", "results/ocr"))
-    for epoch in range(1, epochs + 1):
-        train_loss, epoch_time = _train_epoch(
-            model, train_loader, criterion, optimizer, scaler, autocast,
-            device, non_blocking,
-        )
-        latest_metrics = evaluate_model(
-            model, validation_loader, criterion, vocabulary, device,
-            non_blocking=non_blocking, autocast_context=autocast,
-        )
-        history.append(
-            {
-                "experiment_id": run_id,
-                "epoch": epoch,
-                "epoch_time_seconds": epoch_time,
-                "samples_per_second": len(train_loader.dataset) / max(epoch_time, 1e-12),
-                "train_loss": train_loss,
-                "validation_loss": latest_metrics["validation_loss"],
-                "cer": latest_metrics["cer"],
-                "wer": latest_metrics["wer"],
-                "exact_match_accuracy": latest_metrics["exact_match_accuracy"],
-            }
-        )
-        if save_artifacts and epoch % int(training.get("checkpoint_every", 1)) == 0:
-            save_checkpoint(
-                results_dir / "checkpoints" / f"{run_id}-epoch-{epoch}.pt",
-                model, optimizer, epoch, config, vocabulary,
+    if isinstance(profiling_config, ProfilingConfig):
+        profile_config = profiling_config
+    elif isinstance(profiling_config, dict):
+        profile_config = ProfilingConfig.from_dict(profiling_config)
+    else:
+        profile_config = ProfilingConfig.from_dict(config.get("profiling"))
+    training_profiler = OCRTrainingProfiler(profile_config, device=device, experiment_id=run_id)
+    with training_profiler:
+        for epoch in range(1, epochs + 1):
+            train_loss, epoch_time = _train_epoch(
+                model, train_loader, criterion, optimizer, scaler, autocast,
+                device, non_blocking, training_profiler if profile_config.enabled else None,
             )
+            if profile_config.enabled:
+                with training_profiler.phase("validation"):
+                    latest_metrics = evaluate_model(
+                        model, validation_loader, criterion, vocabulary, device,
+                        non_blocking=non_blocking, autocast_context=autocast,
+                    )
+            else:
+                latest_metrics = evaluate_model(
+                    model, validation_loader, criterion, vocabulary, device,
+                    non_blocking=non_blocking, autocast_context=autocast,
+                )
+            history.append(
+                {
+                    "experiment_id": run_id,
+                    "epoch": epoch,
+                    "epoch_time_seconds": epoch_time,
+                    "samples_per_second": len(train_loader.dataset) / max(epoch_time, 1e-12),
+                    "train_loss": train_loss,
+                    "validation_loss": latest_metrics["validation_loss"],
+                    "cer": latest_metrics["cer"],
+                    "wer": latest_metrics["wer"],
+                    "exact_match_accuracy": latest_metrics["exact_match_accuracy"],
+                }
+            )
+            if save_artifacts and epoch % int(training.get("checkpoint_every", 1)) == 0:
+                save_checkpoint(
+                    results_dir / "checkpoints" / f"{run_id}-epoch-{epoch}.pt",
+                    model, optimizer, epoch, config, vocabulary,
+                )
     total_time = sum(float(row["epoch_time_seconds"]) for row in history)
     metadata = hardware_metadata(device)
     peak_vram = (
         torch.cuda.max_memory_allocated(device) / (1024**2) if device.type == "cuda" else None
     )
+    phase_summary = training_profiler.summary()
+    phase_times = {name: float(values["total_ms"]) for name, values in phase_summary.items()}
+    training_wall_ms = total_time * 1000.0
+    phase_fractions = {
+        name: float(values["total_ms"]) / training_wall_ms
+        for name, values in phase_summary.items()
+        if name in OCRTrainingProfiler.PHASES and training_wall_ms
+    }
+    for name, fraction in phase_fractions.items():
+        phase_summary[name]["fraction_of_training_wall_time"] = fraction
+    profile_file: str | None = None
+    if profile_config.enabled:
+        profile_path = Path(profile_config.output_dir) / "summaries" / f"{run_id}.json"
+        memory = cuda_memory_snapshot(device) if device.type == "cuda" else None
+        profile_result = ProfilingResult(
+            experiment_id=run_id,
+            workload="ocr",
+            device_name=str(metadata["device_name"]),
+            device_type=device.type,
+            torch_version=str(metadata["torch_version"]),
+            cuda_version=str(metadata["cuda_version"]) if metadata["cuda_version"] else None,
+            compute_capability=(
+                str(metadata["compute_capability"]) if metadata.get("compute_capability") else None
+            ),
+            dataset_size=len(train_loader.dataset),
+            batch_size=int(training["batch_size"]),
+            precision=precision,
+            total_time_ms=total_time * 1000.0,
+            cpu_time_ms=total_time * 1000.0 if device.type == "cpu" else None,
+            h2d_time_ms=phase_times.get("h2d_transfer"),
+            forward_time_ms=phase_times.get("forward"),
+            loss_time_ms=phase_times.get("ctc_loss"),
+            backward_time_ms=phase_times.get("backward"),
+            optimizer_time_ms=phase_times.get("optimizer"),
+            data_loading_time_ms=phase_times.get("data_loading"),
+            peak_vram_mb=peak_vram,
+            memory_allocated_mb=memory.allocated_mb if memory else None,
+            memory_reserved_mb=memory.reserved_mb if memory else None,
+            timing_scope="training epochs only; validation is reported separately",
+            notes=[
+                "Phase timers synchronize boundaries and perturb overlap; use the trace for concurrency analysis.",
+                "GPU active fraction and kernel count remain null until derived from trace evidence.",
+            ],
+            extra={
+                "phases": phase_summary,
+                "validation_time_ms": phase_times.get("validation"),
+                "samples_per_second": (len(train_loader.dataset) * epochs) / max(total_time, 1e-12),
+            },
+        )
+        write_profile_json(profile_result, profile_path)
+        profile_file = str(profile_path)
     result = TrainingRunResult(
         experiment_id=run_id,
         experiment_type="training",
@@ -298,6 +402,9 @@ def train_from_config(
         cer=float(latest_metrics["cer"]), wer=float(latest_metrics["wer"]),
         exact_match_accuracy=float(latest_metrics["exact_match_accuracy"]),
         status="completed", seed=seed,
+        phase_times_ms=phase_times,
+        phase_fractions=phase_fractions,
+        profiling_summary_file=profile_file,
     )
     if save_artifacts:
         results_dir.mkdir(parents=True, exist_ok=True)
@@ -316,6 +423,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--precision", choices=("fp32", "fp16", "bf16"))
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--epochs", type=int)
+    parser.add_argument("--profiling-config", default=None)
     return parser.parse_args()
 
 
@@ -328,7 +436,8 @@ def main() -> None:
     ):
         if value is not None:
             config["training"][key] = value
-    result, _, _ = train_from_config(config)
+    profile_config = load_profiling_config(args.profiling_config) if args.profiling_config else None
+    result, _, _ = train_from_config(config, profiling_config=profile_config)
     print(json.dumps(result.to_dict(), indent=2))
 
 

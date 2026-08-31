@@ -15,6 +15,7 @@ data/ocr/generated/*
 data/ocr/metadata/*
 data/ocr/raw/*
 results/ocr/*
+results/profiling/*
 *.pt
 *.pth
 !data/raw/.gitkeep
@@ -26,3 +27,13 @@ results/ocr/*
 !data/ocr/metadata/.gitkeep
 !data/ocr/raw/.gitkeep
 !results/ocr/.gitkeep
+!results/profiling/traces/
+!results/profiling/traces/.gitkeep
+!results/profiling/nsight_systems/
+!results/profiling/nsight_systems/.gitkeep
+!results/profiling/nsight_compute/
+!results/profiling/nsight_compute/.gitkeep
+!results/profiling/summaries/
+!results/profiling/summaries/.gitkeep
+!results/profiling/plots/
+!results/profiling/plots/.gitkeep

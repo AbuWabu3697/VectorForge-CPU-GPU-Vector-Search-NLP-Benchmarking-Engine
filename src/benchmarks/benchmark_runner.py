@@ -8,6 +8,7 @@ import numpy as np
 
 from src.benchmarks.metrics import latency_summary, queries_per_second
 from src.search.base import SearchBackend
+from src.profiling.common.device_info import collect_device_info
 
 
 @dataclass(frozen=True)
@@ -56,8 +57,10 @@ class SearchBenchmarkRunner:
             raise ValueError(f"dataset_size={dataset_size} exceeds vector count={len(vectors)}")
         subset = np.ascontiguousarray(vectors[:dataset_size], dtype=np.float32)
 
+        backend.synchronize()
         build_start = time.perf_counter()
         backend.build(subset)
+        backend.synchronize()
         build_time_ms = (time.perf_counter() - build_start) * 1000.0
 
         query_indices = self.rng.integers(0, dataset_size, size=query_batch_size)
@@ -65,14 +68,18 @@ class SearchBenchmarkRunner:
 
         for _ in range(self.warmup_runs):
             backend.search(queries, k)
+        backend.synchronize()
 
         latencies_ms: list[float] = []
         for _ in range(self.measured_runs):
+            backend.synchronize()
             start = time.perf_counter()
             backend.search(queries, k)
+            backend.synchronize()
             latencies_ms.append((time.perf_counter() - start) * 1000.0)
 
         summary = latency_summary(latencies_ms)
+        metadata = collect_device_info(backend.device_type)
         return BenchmarkResult(
             benchmark_type="search",
             backend=backend.name,
@@ -83,5 +90,8 @@ class SearchBenchmarkRunner:
             build_time_ms=build_time_ms,
             queries_per_second=queries_per_second(query_batch_size, summary["mean_latency_ms"]),
             timestamp=datetime.now(timezone.utc).isoformat(),
+            device=backend.device_type,
+            gpu_name=str(metadata["device_name"]) if backend.device_type == "cuda" else None,
+            gpu_memory_mb=float(metadata["total_vram_mb"]) if metadata["total_vram_mb"] else None,
             **summary,
         )

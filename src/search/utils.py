@@ -16,9 +16,18 @@ def create_search_backend(name: str) -> SearchBackend:
         return NumPySearch()
     if normalized == "faiss_cpu":
         return FaissCpuSearch()
+    if normalized == "faiss_gpu":
+        from src.search.faiss_gpu import FaissGpuSearch
+
+        return FaissGpuSearch()
+    if normalized in {"cuda_naive", "cuda_block_reduce"}:
+        from src.profiling.cuda.brute_force_search.backend import CudaBruteForceSearch
+
+        variant = "naive" if normalized == "cuda_naive" else "block_reduce"
+        return CudaBruteForceSearch(variant=variant)
     raise ValueError(
-        f"Unknown backend {name!r}. Future GPU backends should be registered here "
-        "after implementing SearchBackend."
+        f"Unknown backend {name!r}. Expected numpy, faiss_cpu, faiss_gpu, "
+        "cuda_naive, or cuda_block_reduce."
     )
 
 

@@ -1,0 +1,30 @@
+profiling:
+  enabled: true
+  output_dir: results/profiling
+  phase_timing: true
+
+  nvtx:
+    enabled: true
+
+  pytorch_profiler:
+    enabled: true
+    wait_steps: 1
+    warmup_steps: 1
+    active_steps: 3
+    repeat: 1
+    record_shapes: true
+    profile_memory: true
+    with_stack: false
+    row_limit: 25
+
+  utilization:
+    enabled: false
+    interval_ms: 200
+
+search:
+  dataset_sizes: [10000, 100000, 1000000]
+  query_batches: [1, 32, 256]
+
+ocr:
+  profile_batches: [8, 32, 128]
+  precisions: [fp32, fp16]
