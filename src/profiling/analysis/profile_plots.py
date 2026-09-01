@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -34,7 +35,10 @@ def plot_search_latency_breakdown(rows: Iterable[dict[str, Any]], output: str | 
     if not data:
         raise ValueError("No measured search rows were supplied.")
     phases = ["h2d", "search", "top_k", "d2h"]
-    labels = [f"{row.get('extra', {}).get('backend', row.get('backend', 'search'))}\nB={row.get('batch_size')}" for row in data]
+    labels = [
+        f"{_extra_value(row, 'backend', row.get('backend', 'search'))}\nB={row.get('batch_size')}"
+        for row in data
+    ]
     figure, axis = plt.subplots(figsize=(9, 5))
     bottom = np.zeros(len(data))
     for phase in phases:
@@ -79,7 +83,7 @@ def plot_cuda_implementation_comparison(rows: Iterable[dict[str, Any]], output: 
     if not data:
         raise ValueError("No measured CUDA search rows were supplied.")
     labels = [
-        f"{row.get('extra', {}).get('variant', row.get('backend', 'unknown'))}\nB={row.get('batch_size')}"
+        f"{_extra_value(row, 'variant', row.get('backend', 'unknown'))}\nB={row.get('batch_size')}"
         for row in data
     ]
     values = [float(row["search_time_ms"]) for row in data]
@@ -96,3 +100,14 @@ def _save(figure: Any, output: str | Path) -> Path:
     figure.savefig(path, dpi=160)
     plt.close(figure)
     return path
+
+
+def _extra_value(row: dict[str, Any], key: str, fallback: Any) -> Any:
+    """Read nested metadata before or after its JSON round-trip through CSV."""
+    extra = row.get("extra", {})
+    if isinstance(extra, str):
+        try:
+            extra = json.loads(extra)
+        except json.JSONDecodeError:
+            return fallback
+    return extra.get(key, fallback) if isinstance(extra, dict) else fallback

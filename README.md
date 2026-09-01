@@ -425,7 +425,7 @@ bash scripts/profile_cuda_search.sh --ncu --dataset-size 10000 --batch-size 32
 1. refuses to continue without an assigned NVIDIA GPU and `nvcc`;
 2. clones the exact GitHub repository and records its commit;
 3. preserves Colab's CUDA-enabled PyTorch while installing the remaining dependencies;
-4. requires all 29 CPU/CUDA tests to pass with zero skips;
+4. requires all 30 CPU/CUDA tests to pass with zero skips;
 5. records the assigned GPU and correct wall/Event timing;
 6. profiles representative OCR FP32/FP16 and batch-size cases;
 7. validates and benchmarks both custom CUDA search kernels; and
